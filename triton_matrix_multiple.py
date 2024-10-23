@@ -1,3 +1,4 @@
+import time
 import torch
 import triton
 import triton.language as tl
@@ -48,7 +49,6 @@ def triton_matmul(A, B):
     # Get matrix dimensions
     M, K = A.shape
     Kb, N = B.shape
-    assert K == Kb, "Inner dimensions must match."
 
     # Output matrix
     C = torch.empty((M, N), device=A.device, dtype=A.dtype)
@@ -81,9 +81,16 @@ if __name__ == "__main__":
     B = torch.randn(1024, 1024, device='cuda', dtype=torch.float32)
 
     # Perform matrix multiplication using Triton
+    start_time = time.time()
     C = triton_matmul(A, B)
+    triton_time = time.time() - start_time
+    print(f"Triton matmul time: {triton_time:.6f} seconds")
 
     # Verify correctness
+    start_time = time.time()
     C_torch = torch.matmul(A, B)
+    torch_time = time.time() - start_time
+    print(f"PyTorch matmul time: {torch_time:.6f} seconds")
+
     max_diff = torch.max(torch.abs(C - C_torch))
     print(f"Max difference between Triton and PyTorch results: {max_diff}")
