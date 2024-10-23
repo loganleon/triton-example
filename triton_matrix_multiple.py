@@ -77,8 +77,9 @@ def triton_matmul(A, B):
 # Example usage
 if __name__ == "__main__":
     # Initialize matrices
-    A = torch.randn(1024, 1024, device='cuda', dtype=torch.float32)
-    B = torch.randn(1024, 1024, device='cuda', dtype=torch.float32)
+    # the device should be `cuda` in real problem
+    A = torch.randn(1024, 1024, device='cpu', dtype=torch.float32)
+    B = torch.randn(1024, 1024, device='cpu', dtype=torch.float32)
 
     # Perform matrix multiplication using Triton
     start_time = time.time()
