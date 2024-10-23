@@ -15,39 +15,40 @@ def matmul_kernel(
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # Block indices
+    # Compute the starting indices of the block
     offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     offs_k = tl.arange(0, BLOCK_SIZE)
 
-    # Pointers to blocks in A and B
+    # Create pointers to the blocks in A and B
     A_block_ptr = A_ptr + (offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak)
     B_block_ptr = B_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
 
-    # Initialize accumulator
+    # Initialize the accumulator
     acc = tl.zeros([BLOCK_SIZE, BLOCK_SIZE], dtype=tl.float32)
 
-    # Loop over K dimension
+    # Loop over K dimension in steps of BLOCK_SIZE
     for k in range(0, K, BLOCK_SIZE):
         # Load blocks from A and B
-        A_block = tl.load(A_block_ptr)
-        B_block = tl.load(B_block_ptr)
+        A_block = tl.load(A_block_ptr, mask=offs_m[:, None] < M)
+        B_block = tl.load(B_block_ptr, mask=offs_n[None, :] < N)
 
-        # Update pointers for next block
+        # Accumulate the product
+        acc += tl.dot(A_block, B_block)
+
+        # Update pointers for the next block
         A_block_ptr += BLOCK_SIZE * stride_ak
         B_block_ptr += BLOCK_SIZE * stride_bk
 
-        # Accumulate partial results
-        acc += tl.dot(A_block, B_block)
-
-    # Write back the result
+    # Write the result back to C
     C_ptr = C_ptr + (offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn)
-    tl.store(C_ptr, acc)
+    tl.store(C_ptr, acc, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
 
 def triton_matmul(A, B):
     # Get matrix dimensions
     M, K = A.shape
-    K, N = B.shape
+    Kb, N = B.shape
+    assert K == Kb, "Inner dimensions must match."
 
     # Output matrix
     C = torch.empty((M, N), device=A.device, dtype=A.dtype)
@@ -56,7 +57,10 @@ def triton_matmul(A, B):
     BLOCK_SIZE = 32
 
     # Define grid size
-    grid = ( (M + BLOCK_SIZE - 1) // BLOCK_SIZE, (N + BLOCK_SIZE - 1) // BLOCK_SIZE )
+    grid = (
+        (M + BLOCK_SIZE - 1) // BLOCK_SIZE,
+        (N + BLOCK_SIZE - 1) // BLOCK_SIZE
+    )
 
     # Launch the kernel
     matmul_kernel[grid](
@@ -81,4 +85,5 @@ if __name__ == "__main__":
 
     # Verify correctness
     C_torch = torch.matmul(A, B)
-    print(f"Max difference: {torch.max(torch.abs(C - C_torch))}")
+    max_diff = torch.max(torch.abs(C - C_torch))
+    print(f"Max difference between Triton and PyTorch results: {max_diff}")
