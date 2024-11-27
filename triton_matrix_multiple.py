@@ -2,6 +2,24 @@ import time
 import torch
 import triton
 import triton.language as tl
+import os
+
+def get_device():
+    # Check if CUDA is available
+    if torch.cuda.is_available():
+        print("CUDA-capable NVIDIA GPU detected. Using CUDA.")
+        return "cuda"
+
+    # Fallback to CPU for other platforms
+    print("No compatible GPU found. Using CPU.")
+    return "cpu"
+
+
+device = get_device()
+# Execute kernel (interpret mode for non-CUDA devices)
+if device == "cpu":
+    os.environ["TRITON_INTERPRET"] = "1"
+print(f'TRITON_INTERPRET = {os.getenv("TRITON_INTERPRET")}')
 
 @triton.jit
 def matmul_kernel(
