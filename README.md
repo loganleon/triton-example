@@ -52,6 +52,4 @@ Follow these steps to set up the environment:
 
 ## References
 - Triton: [https://github.com/openai/triton](https://github.com/openai/triton)
-- cuSPARSE Library: [https://developer.nvidia.com/cusparse](https://developer.nvidia.com/cusparse)
 - Mehridehnavi, M., & Chowdhury, R. A. (2021). ParSy: Inspection and Transformation of Sparse Matrix Computations for Parallelism. [Paper](https://www.cs.toronto.edu/~mmehride/papers/Parsy.pdf)
-- Saad, Y. (2003). Iterative Methods for Sparse Linear Systems. SIAM.
