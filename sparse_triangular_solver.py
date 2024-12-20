@@ -1,61 +1,101 @@
-import os
 import torch
 import triton
 import triton.language as tl
 
-
-
-# Triton kernel definition
 @triton.jit
-def sptrsv_csr_kernel(Lp, Li, Lx, b, x, n, BLOCK_SIZE: tl.constexpr):
-    row_idx = tl.program_id(0)  # Each block handles one row
-    if row_idx >= n:
-        return
+def sptrsv_csr_kernel(Lp, Li, Lx, x, level_set, level_ptr, n, BLOCK_SIZE: tl.constexpr):
+    row_idx = tl.program_id(0)  # Get the program ID in the 1D grid
 
-    # Initialize the sum for this row
-    sum_val = tl.zeros((1,), dtype=tl.float32)
+    # Get the current level
+    level_start = tl.load(level_ptr + row_idx)
+    level_end = tl.load(level_ptr + row_idx + 1)
 
-    # Read the range of non-zero elements for this row
-    row_start = tl.load(Lp + row_idx)
-    row_end = tl.load(Lp + row_idx + 1)
+    # Process all rows in this level
+    for level_row in range(level_start, level_end):
+        row = tl.load(level_set + level_row)  # Get the actual row index from level set
+        row_start = tl.load(Lp + row)
+        row_end = tl.load(Lp + row + 1)
 
-    # Process all non-diagonal elements
-    for idx in range(row_start, row_end - 1):
-        col_idx = tl.load(Li + idx)
-        val = tl.load(Lx + idx)
-        sum_val += val * tl.load(x + col_idx)
+        # Load diagonal and RHS value
+        diag_val = tl.load(Lx + row_end - 1)
+        rhs = tl.load(x + row)
 
-    # Handle the diagonal element
-    diag_idx = row_end - 1
-    diag_val = tl.load(Lx + diag_idx)
-    rhs = tl.load(b + row_idx)
-    tl.store(x + row_idx, (rhs - sum_val) / diag_val)
+        # Process all non-diagonal elements in the row
+        sum_val = 0.0
+        for col in range(row_start, row_end - 1):
+            col_idx = tl.load(Li + col)
+            val = tl.load(Lx + col)
+            x_val = tl.load(x + col_idx)
+            sum_val += val * x_val
 
-def sptrsv_csr(Lp, Li, Lx, b, x, n):
-    BLOCK_SIZE = 128
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)  # Ensure grid is a tuple
-    sptrsv_csr_kernel[grid](Lp, Li, Lx, b, x, n, BLOCK_SIZE=BLOCK_SIZE)
+        # Store the result
+        result = (rhs - sum_val) / diag_val
+        tl.store(x + row, result)
 
+def sptrsv_csr(Lp, Li, Lx, b, x, level_set, level_ptr, n, device):
+    BLOCK_SIZE = 128  # Number of threads per block
+    num_levels = len(level_ptr) - 1
 
+    # Allocate Triton tensor for level scheduling
+    level_ptr_triton = torch.tensor(level_ptr, dtype=torch.int32, device=device)
+    level_set_triton = torch.tensor(level_set, dtype=torch.int32, device=device)
+
+    # Launch the kernel
+    sptrsv_csr_kernel[(num_levels,)](
+        Lp, Li, Lx, x, level_set_triton, level_ptr_triton, n, BLOCK_SIZE=BLOCK_SIZE
+    )
+
+def preprocess_levels(Lp, Li, n):
+    """ Precompute level scheduling information for sparse triangular solve """
+    in_degree = [0] * n
+    levels = [-1] * n
+    level_ptr = [0]
+    level_set = []
+
+    # Calculate in-degree for each row
+    for row in range(n):
+        for i in range(Lp[row], Lp[row + 1]):
+            in_degree[Li[i]] += 1
+
+    # Compute levels using topological sorting
+    queue = [i for i in range(n) if in_degree[i] == 0]
+    while queue:
+        level_ptr.append(len(level_set))
+        next_queue = []
+        for row in queue:
+            level_set.append(row)
+            for i in range(Lp[row], Lp[row + 1]):
+                col = Li[i]
+                in_degree[col] -= 1
+                if in_degree[col] == 0:
+                    next_queue.append(col)
+        queue = next_queue
+
+    level_ptr.append(len(level_set))
+    return level_set, level_ptr
+
+# Example: Testing the implementation
+def test_sptrsv():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Sparse matrix in CSR format
+    Lp = torch.tensor([0, 2, 4, 7, 9], dtype=torch.int32, device=device)
+    Li = torch.tensor([0, 1, 1, 2, 0, 2, 3, 2, 3], dtype=torch.int32, device=device)
+    Lx = torch.tensor([4.0, 1.0, 2.0, 3.0, 1.0, 5.0, 2.0, 1.0, 3.0], dtype=torch.float32, device=device)
+
+    # Right-hand side and solution vector
+    b = torch.tensor([5.0, 5.0, 6.0, 4.0], dtype=torch.float32, device=device)
+    x = b.clone()
+
+    # Precomputed level scheduling information
+    level_set, level_ptr = preprocess_levels(Lp.cpu().numpy(), Li.cpu().numpy(), len(b))
+
+    # Solve
+    sptrsv_csr(Lp, Li, Lx, b, x, level_set, level_ptr, len(b), device)
+
+    # Verify
+    print("Solution:", x.cpu().numpy())
+
+# Run the test
 if __name__ == "__main__":
-    # Example sparse triangular matrix in CSR format
-    # Matrix L:
-    # [2   0   0   0]
-    # [3   4   0   0]
-    # [0   1   5   0]
-    # [6   0   2   7]
-    # RHS vector b: [4, 10, 15, 35]
-    # Expected solution x: [2, 1, 2, 3]
-
-    Lp = torch.tensor([0, 1, 3, 5, 8], dtype=torch.int32).cuda()
-    Li = torch.tensor([0, 0, 1, 1, 2, 0, 2, 3], dtype=torch.int32).cuda()
-    Lx = torch.tensor([2, 3, 4, 1, 5, 6, 2, 7], dtype=torch.float32).cuda()
-    b = torch.tensor([4, 10, 15, 35], dtype=torch.float32).cuda()
-    x = torch.zeros(4, dtype=torch.float32).cuda()  # Solution vector
-
-    # Solve the system
-    n = 4
-    sptrsv_csr(Lp, Li, Lx, b, x, n)
-
-    # Print the solution
-    print("Solution x:", x.cpu().numpy())
+    test_sptrsv()
